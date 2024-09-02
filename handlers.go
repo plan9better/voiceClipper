@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -11,11 +12,19 @@ import (
 	"github.com/pion/webrtc/v3/pkg/media/oggwriter"
 )
 
+var (
+	isRecording     bool
+	recordMutex     sync.Mutex
+	voiceConnection *discordgo.VoiceConnection
+)
+
+var v *discordgo.VoiceConnection
+
 func handleError(s *discordgo.Session, i *discordgo.InteractionCreate, errorMessage string) {
 	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			Content: fmt.Sprintf("**Error:** %s", errorMessage),
+			Content: fmt.Sprintf("Error: %s", errorMessage),
 		},
 	})
 	if err != nil {
@@ -40,48 +49,62 @@ func newInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	case "list":
 		println("Used command 'list'")
+		isRecording = true
 		handleListChannels(s, i)
 		return
+	case "stop":
+		println("used command 'stop'")
+		isRecording = false
+		handleStop(s, i)
+
 	default:
 		return
 	}
 }
 
+func handleStop(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if v != nil {
+		if v.OpusRecv != nil {
+			close(v.OpusRecv)
+			println("Closed opusrecv")
+		}
+		v.Close()
+		println("Closed v")
+	}
+	go func() {
+		msg := "stopping"
+		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: msg,
+			},
+		})
+		if err != nil {
+			log.Panicf("Could not respond to interaction: %s", err)
+		}
+	}()
+}
+
 func handleListChannels(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// println("Handling list channels command")
-	// guild, err := s.Guild(i.GuildID)
-	// if err != nil {
-	// 	handleError(s, i, "Could not find Guild ID")
-	// }
-	// voiceStates := guild.VoiceStates
-	// println(len(voiceStates))
-	// channels := make(map[string]int, len(voiceStates))
-	// for _, vs := range voiceStates {
-	// 	println(vs.ChannelID, vs.Member.User.GlobalName)
-	// 	channels[vs.ChannelID] = 1
-	// 	if channels[vs.ChannelID] >= 1 {
-	// 		channels[vs.ChannelID] += 1
-	// 	}
-	// }
-
-	// maxChan := ""
-	// maxUsers := 0
-	// for ch, n := range channels {
-	// 	if n > maxUsers {
-	// 		maxChan = ch
-	// 	}
-	// }
-
-	// if maxChan != "" {
-	v, err := s.ChannelVoiceJoin(i.GuildID, "1265656310821818502", true, false)
+	var err error
+	v, err = s.ChannelVoiceJoin(i.GuildID, "1265656310821818502", true, false)
 	if err != nil {
 		handleError(s, i, "Could not join voice channel")
 	}
 	go func() {
-		time.Sleep(10 * time.Second)
-		close(v.OpusRecv)
+		var filename byte
+		filename = 0
+
+		for isRecording {
+			handleVoice(v.OpusRecv, filename)
+			time.Sleep(10 * time.Second)
+			close(v.OpusRecv)
+			filename += 1
+			filename %= 10
+		}
 		v.Close()
 	}()
+	// handleVoice(v.OpusRecv)
 	go func() {
 		msg := "Joining"
 		err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -94,18 +117,16 @@ func handleListChannels(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			log.Panicf("Could not respond to interaction: %s", err)
 		}
 	}()
-	handleVoice(v.OpusRecv)
 
-	// }
 }
 
-func handleVoice(c chan *discordgo.Packet) {
+func handleVoice(c chan *discordgo.Packet, filename byte) {
 	files := make(map[uint32]media.Writer)
 	for p := range c {
 		file, ok := files[p.SSRC]
 		if !ok {
 			var err error
-			file, err = oggwriter.New(fmt.Sprintf("audio/%d.ogg", p.SSRC), 48000, 2)
+			file, err = oggwriter.New(fmt.Sprintf("audio/%d.ogg", filename), 48000, 2)
 			if err != nil {
 				fmt.Printf("failed to create file %d.ogg, giving up on recording: %v\n", p.SSRC, err)
 				return
@@ -125,7 +146,7 @@ func handleEcho(s *discordgo.Session, i *discordgo.InteractionCreate, opts optio
 	builder := new(strings.Builder)
 	if v, ok := opts["author"]; ok && v.BoolValue() {
 		author := interactionAuthor(i.Interaction)
-		builder.WriteString("**" + author.String() + "** says: ")
+		builder.WriteString("" + author.String() + " says: ")
 	}
 	builder.WriteString(opts["message"].StringValue())
 

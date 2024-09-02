@@ -8,6 +8,10 @@ var commands = []*discordgo.ApplicationCommand{
 		Description: "List all the channels in this guild",
 	},
 	{
+		Name:        "stop",
+		Description: "stop listening",
+	},
+	{
 		Name:        "join",
 		Description: "Join the vc of sender",
 	},
